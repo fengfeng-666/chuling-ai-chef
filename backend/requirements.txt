@@ -1,6 +1,7 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
+langchain-openai>=0.3.0
 python-multipart==0.0.20
 aiofiles==24.1.0
 sqlalchemy==2.0.36

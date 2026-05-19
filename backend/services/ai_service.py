@@ -1,8 +1,23 @@
 import base64
 import json
-import httpx
+
+from langchain_openai import ChatOpenAI
+from openai import APIStatusError, APITimeoutError
 
 from config import QWEN_API_KEY, QWEN_API_URL, QWEN_MODEL
+
+QWEN_API_BASE = QWEN_API_URL.replace("/chat/completions", "")
+
+_llm = ChatOpenAI(
+    model=QWEN_MODEL,
+    api_key=QWEN_API_KEY,
+    base_url=QWEN_API_BASE,
+    max_tokens=4096,
+    temperature=0.8,
+    timeout=120.0,
+)
+
+_analyze_llm = _llm.bind(temperature=0.7)
 
 SYSTEM_PROMPT = """你是一个专业的厨师和食材识别专家。用户会提供一张食材图片。
 
@@ -54,24 +69,8 @@ async def analyze_ingredients(image_bytes: bytes, mime_type: str) -> dict:
         },
     ]
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            QWEN_API_URL,
-            headers={
-                "Authorization": f"Bearer {QWEN_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": QWEN_MODEL,
-                "messages": messages,
-                "max_tokens": 4096,
-                "temperature": 0.7,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-
-    content = data["choices"][0]["message"]["content"]
+    result = await _analyze_llm.ainvoke(messages)
+    content = result.content if isinstance(result.content, str) else ""
     return _parse_json_response(content)
 
 
@@ -119,24 +118,8 @@ async def quiz_recommend(answers: dict) -> dict:
         {"role": "user", "content": user_message},
     ]
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            QWEN_API_URL,
-            headers={
-                "Authorization": f"Bearer {QWEN_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": QWEN_MODEL,
-                "messages": messages,
-                "max_tokens": 4096,
-                "temperature": 0.8,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-
-    content = data["choices"][0]["message"]["content"]
+    result = await _llm.ainvoke(messages)
+    content = result.content if isinstance(result.content, str) else ""
     return _parse_json_response(content)
 
 
@@ -217,7 +200,6 @@ async def chat_with_ai(message: str, image_bytes: bytes = None, mime_type: str =
 
     messages = [{"role": "system", "content": CHAT_PROMPT}]
 
-    # 插入对话历史（截断到最近 N 条，避免超出 token 限制）
     if history:
         recent = history[-HISTORY_MAX:]
         for h in recent:
@@ -226,25 +208,29 @@ async def chat_with_ai(message: str, image_bytes: bytes = None, mime_type: str =
 
     messages.append({"role": "user", "content": user_content})
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            QWEN_API_URL,
-            headers={
-                "Authorization": f"Bearer {QWEN_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": QWEN_MODEL,
-                "messages": messages,
-                "max_tokens": 4096,
-                "temperature": 0.8,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
+    result = await _llm.ainvoke(messages)
+    content = result.content if isinstance(result.content, str) else ""
 
-    content = data["choices"][0]["message"]["content"]
-    return _parse_json_response(content)
+    # 解析 marker 格式：前面是自然语言回复，后面是 JSON 结构数据
+    marker_pos = content.find(MARKER)
+    if marker_pos >= 0:
+        reply = content[:marker_pos].strip()
+        json_str = content[marker_pos + len(MARKER):].strip()
+        if json_str.startswith("```"):
+            lines = json_str.split("\n")
+            json_str = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        parsed = _parse_json_response(json_str)
+        return {
+            "reply": reply,
+            "ingredients": parsed.get("ingredients", []),
+            "recipes": parsed.get("recipes", []),
+        }
+    else:
+        # 无 marker，尝试纯 JSON 或原样返回
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return {"reply": content, "ingredients": [], "recipes": []}
 
 
 async def chat_with_ai_stream(
@@ -254,7 +240,6 @@ async def chat_with_ai_stream(
     history: list[dict] | None = None,
 ):
     """异步生成器，流式调用 Qwen API，逐块 yield (event_type, data)。"""
-    # 构建 user content（与 chat_with_ai 相同逻辑）
     user_content = []
     if image_bytes:
         image_base64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -273,94 +258,66 @@ async def chat_with_ai_stream(
     messages.append({"role": "user", "content": user_content})
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
-                "POST",
-                QWEN_API_URL,
-                headers={
-                    "Authorization": f"Bearer {QWEN_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": QWEN_MODEL,
-                    "messages": messages,
-                    "max_tokens": 4096,
-                    "temperature": 0.8,
-                    "stream": True,
-                },
-            ) as response:
-                response.raise_for_status()
+        full_text = ""
+        yielded_until = 0
+        marker_found_at = -1
 
-                full_text = ""
-                yielded_until = 0
-                marker_found_at = -1
+        async for chunk in _llm.astream(messages):
+            delta = chunk.content if isinstance(chunk.content, str) else ""
+            if not delta:
+                continue
 
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    payload = line[6:]
-                    if payload == "[DONE]":
-                        break
+            full_text += delta
 
-                    try:
-                        chunk = json.loads(payload)
-                        delta = chunk["choices"][0].get("delta", {}).get("content", "")
-                        if not delta:
-                            continue
-                    except (json.JSONDecodeError, KeyError, IndexError):
-                        continue
+            if marker_found_at >= 0:
+                continue
 
-                    full_text += delta
-
-                    if marker_found_at >= 0:
-                        continue  # 已过 marker，继续缓存
-
-                    pos = full_text.find(MARKER)
-                    if pos >= 0:
-                        marker_found_at = pos
-                        before_marker = full_text[yielded_until:pos]
-                        if before_marker:
-                            yield ("text", before_marker)
-                        yielded_until = len(full_text)
-                    else:
-                        new_text = full_text[yielded_until:]
-                        prefix_len = _marker_prefix_len(new_text)
-                        if prefix_len > 0:
-                            safe_text = new_text[:-prefix_len]
-                            if safe_text:
-                                yield ("text", safe_text)
-                            yielded_until = len(full_text) - prefix_len
-                        else:
-                            if new_text:
-                                yield ("text", new_text)
-                            yielded_until = len(full_text)
-
-                # 流结束 — 解析 structured data
-                if marker_found_at >= 0:
-                    json_str = full_text[marker_found_at + len(MARKER):].strip()
-                    if json_str.startswith("```"):
-                        lines = json_str.split("\n")
-                        json_str = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-                    try:
-                        data = json.loads(json_str)
-                        yield ("recipes", {
-                            "recipes": data.get("recipes", []),
-                            "ingredients": data.get("ingredients", []),
-                        })
-                    except json.JSONDecodeError:
-                        remaining = full_text[marker_found_at + len(MARKER):].strip()
-                        if remaining:
-                            yield ("text", remaining)
+            pos = full_text.find(MARKER)
+            if pos >= 0:
+                marker_found_at = pos
+                before_marker = full_text[yielded_until:pos]
+                if before_marker:
+                    yield ("text", before_marker)
+                yielded_until = len(full_text)
+            else:
+                new_text = full_text[yielded_until:]
+                prefix_len = _marker_prefix_len(new_text)
+                if prefix_len > 0:
+                    safe_text = new_text[:-prefix_len]
+                    if safe_text:
+                        yield ("text", safe_text)
+                    yielded_until = len(full_text) - prefix_len
                 else:
-                    remaining = full_text[yielded_until:]
-                    if remaining:
-                        yield ("text", remaining)
+                    if new_text:
+                        yield ("text", new_text)
+                    yielded_until = len(full_text)
 
-                yield ("done", {})
+        # 流结束 — 解析 structured data
+        if marker_found_at >= 0:
+            json_str = full_text[marker_found_at + len(MARKER):].strip()
+            if json_str.startswith("```"):
+                lines = json_str.split("\n")
+                json_str = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            try:
+                data = json.loads(json_str)
+                yield ("recipes", {
+                    "recipes": data.get("recipes", []),
+                    "ingredients": data.get("ingredients", []),
+                })
+            except json.JSONDecodeError:
+                remaining = full_text[marker_found_at + len(MARKER):].strip()
+                if remaining:
+                    yield ("text", remaining)
+        else:
+            remaining = full_text[yielded_until:]
+            if remaining:
+                yield ("text", remaining)
 
-    except httpx.HTTPStatusError as e:
-        yield ("error", f"AI 服务请求失败 (HTTP {e.response.status_code})")
-    except httpx.TimeoutException:
+        yield ("done", {})
+
+    except APIStatusError as e:
+        yield ("error", f"AI 服务请求失败 (HTTP {e.status_code})")
+    except APITimeoutError:
         yield ("error", "AI 响应超时，请重试")
     except Exception as e:
         yield ("error", f"AI 服务异常: {str(e)}")
