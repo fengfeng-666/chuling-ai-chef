@@ -1,0 +1,39 @@
+# 厨灵 Systemd 服务
+# 放到 /etc/systemd/system/chuling.service 然后:
+#   systemctl daemon-reload
+#   systemctl enable chuling
+#   systemctl start chuling
+
+[Unit]
+Description=厨灵 - AI 智能菜谱推荐系统
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/chuling/backend
+EnvironmentFile=/opt/chuling/backend/.env
+ExecStart=/opt/chuling/backend/venv/bin/gunicorn main:app \
+    -w 4 \
+    -k uvicorn.workers.UvicornWorker \
+    -b 127.0.0.1:8000 \
+    --access-logfile - \
+    --error-logfile - \
+    --capture-output
+
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# 安全加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/chuling/backend/uploads
+
+[Install]
+WantedBy=multi-user.target

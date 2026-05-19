@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl *)",
+      "Bash(pip install *)",
+      "Bash(netstat -ano)",
+      "Bash(findstr \":8000\")",
+      "Bash(taskkill *)",
+      "PowerShell(Stop-Process *)",
+      "Bash(python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(Start-Sleep 3)",
+      "Bash(findstr \":8000.*LISTEN\")",
+      "Bash(findstr \":5173.*LISTEN\")",
+      "Bash(npx vite *)"
+    ]
+  }
+}
