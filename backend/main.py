@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from config import CORS_ORIGINS, UPLOAD_DIR
 from database import engine, Base
@@ -35,14 +36,34 @@ app.include_router(auth_router)
 app.include_router(sessions_router)
 
 
+# 生产环境：托管前端静态文件
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+
+
 @app.get("/")
 async def root():
+    if os.path.isdir(FRONTEND_DIR):
+        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
     return {"message": "厨灵 API", "version": "2.0.0"}
 
 
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+# SPA fallback —— 必须在所有 API 路由之后注册
+if os.path.isdir(FRONTEND_DIR):
+    assets_dir = os.path.join(FRONTEND_DIR, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        file_path = os.path.join(FRONTEND_DIR, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
 if __name__ == "__main__":

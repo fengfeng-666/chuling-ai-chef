@@ -1,0 +1,31 @@
+# 厨灵 — 单容器简化部署
+# 启动: docker compose -f docker-compose.simple.yml up -d
+# 查看日志: docker compose -f docker-compose.simple.yml logs -f
+# 停止: docker compose -f docker-compose.simple.yml down
+
+version: "3.9"
+
+services:
+  chuling:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.simple
+    ports:
+      - "8000:8000"
+    environment:
+      QWEN_API_KEY: ${QWEN_API_KEY}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen3.5-omni-plus}
+      CHULING_SECRET: ${CHULING_SECRET}
+      DATABASE_URL: sqlite:////app/data/chuling.db
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-10}
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-10485760}
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - chuling_data:/app/data
+      - chuling_uploads:/app/uploads
+    restart: unless-stopped
+
+volumes:
+  chuling_data:
+  chuling_uploads:
